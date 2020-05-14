@@ -1,0 +1,4 @@
+classes= 4
+train=/home/chencq/data/yolo_test_data/train.txt
+valid=/home/chencq/data/yolo_test_data/test.txt
+names=data/myv3.names
