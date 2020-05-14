@@ -120,7 +120,9 @@ def detect(save_txt=False, save_img=False):
             # Stream results
             if view_img:
                 cv2.imshow(p, im0)
-
+                if cv2.waitKey(100) == ord('q'):  # q to quit
+                    raise StopIteration
+                # CV2.waitKey(0)
             # Save results (image with detections)
             if save_img:
                 if dataset.mode == 'images':
@@ -147,18 +149,20 @@ def detect(save_txt=False, save_img=False):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--cfg', type=str, default='cfg/yolov3.cfg', help='cfg file path')
-    parser.add_argument('--data', type=str, default='data/coco.data', help='coco.data file path')
-    parser.add_argument('--weights', type=str, default='weights/yolov3.weights', help='path to weights file')
-    parser.add_argument('--source', type=str, default='data/samples', help='source')  # input file/folder, 0 for webcam
+    parser.add_argument('--cfg', type=str, default='cfg/yolov3/yolov3-spp-lite-car.cfg', help='cfg file path')
+    parser.add_argument('--data', type=str, default='cfg/didi8cls_local.data', help='coco.data file path')
+    parser.add_argument('--weights', type=str, default='weights/yolov3/last.weights', help='path to weights file')
+    # parser.add_argument('--weights', type=str, default='weights/20200508_2334/best.pt', help='path to weights file')
+    parser.add_argument('--source', type=str, default='/data/jpgs_match-15', help='source')  # input file/folder, 0 for webcam
+    # parser.add_argument('--source', type=str, default='data/samples', help='source')  # input file/folder, 0 for webcam
     parser.add_argument('--output', type=str, default='output', help='output folder')  # output folder
-    parser.add_argument('--img_size', type=int, default=608, help='inference size (pixels)')
+    parser.add_argument('--img_size', type=int, default=416, help='inference size (pixels)')
     parser.add_argument('--conf_thres', type=float, default=0.5, help='object confidence threshold')
     parser.add_argument('--nms_thres', type=float, default=0.5, help='iou threshold for non-maximum suppression')
     parser.add_argument('--fourcc', type=str, default='mp4v', help='output video codec (verify ffmpeg support)')
     parser.add_argument('--half', action='store_true', help='half precision FP16 inference')
     parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
-    parser.add_argument('--view_img', action='store_true', help='display results')
+    parser.add_argument('--view_img', action='store_true', default=True, help='display results')
     opt = parser.parse_args()
     print(opt)
 

@@ -516,7 +516,7 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.5):
         # shape_likelihood[:, c] =
         #   multivariate_normal.pdf(x, mean=mat['class_mu'][c, :2], cov=mat['class_cov'][c, :2, :2])
 
-        # Multiply conf by class conf to get combined confidence
+        # Multiply conf by class conf to get combined confidence : class_conf*obj_conf
         class_conf, class_pred = pred[:, 5:].max(1)
         pred[:, 4] *= class_conf
 
@@ -526,7 +526,7 @@ def non_max_suppression(prediction, conf_thres=0.5, nms_thres=0.5):
         # # Remove classes (optional)
         # pred[class_pred != 2, 4] = 0.0
 
-        # Select only suitable predictions
+        # Select only suitable predictions   (> conf_thres and w,h > 2 and pred is not NaN +/- inf)
         i = (pred[:, 4] > conf_thres) & (pred[:, 2:4] > min_wh).all(1) & torch.isfinite(pred).all(1)
         pred = pred[i]
 

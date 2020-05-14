@@ -6,16 +6,17 @@ import shutil
 import time
 from pathlib import Path
 from threading import Thread
-
+import lmdb
 import cv2
 import numpy as np
 import torch
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
-
+import shelve
 from utils.utils import xyxy2xywh, xywh2xyxy
-
+from memory_profiler import profile
+from .lmdb_processor import datum_pb2
 img_formats = ['.bmp', '.jpg', '.jpeg', '.png', '.tif']
 vid_formats = ['.mov', '.avi', '.mp4']
 
@@ -98,7 +99,7 @@ class LoadImages:  # for inference
             assert img0 is not None, 'Image Not Found ' + path
             print('image %g/%g %s: ' % (self.count, self.nF, path), end='')
 
-        # Padded resize
+        # Padded resize (resize to 32 times size pad 2 side)
         img = letterbox(img0, new_shape=self.img_size)[0]
 
         # Normalize RGB
@@ -253,10 +254,15 @@ class LoadStreams:  # multiple IP or RTSP cameras
     def __len__(self):
         return 0  # 1E12 frames = 32 streams at 30 FPS for 30 years
 
-
+# @profile(precision=4, stream=open('memory_profiler.log','w+'))
 class LoadImagesAndLabels(Dataset):  # for training/testing
-    def __init__(self, path, img_size=416, batch_size=16, augment=False, hyp=None, rect=True, image_weights=False,
-                 cache_labels=False, cache_images=False):
+    def __init__(self, path, img_size=416, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
+                 cache_labels=False, cache_images=False, use_lmdb=False, phase='train', img_shelve=False):
+        self.lmdb = use_lmdb
+        self.label_shelve = '/data/det/out/yoloDiDi/{}73184_labels_shelve'.format(phase) if cache_labels else False
+        if self.label_shelve:
+            os.makedirs(self.label_shelve, exist_ok=True)
+        self.img_shelve = '/data/det/out/yoloDiDi/img73184_shelve_{}'.format(phase) if img_shelve else False
         path = str(Path(path))  # os-agnostic
         with open(path, 'r') as f:
             self.img_files = [x.replace('/', os.sep) for x in f.read().splitlines()  # os-agnostic
@@ -274,6 +280,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.hyp = hyp
         self.image_weights = image_weights
         self.rect = False if image_weights else rect
+        self.mosaic = True and self.augment  # load 4 images at a time into a mosaic (only during training)
 
         # Define labels
         self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt')
@@ -315,66 +322,83 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Preload labels (required for weighted CE training)
         self.imgs = [None] * n
         self.labels = [None] * n
+        # if 0:  # cache labels for faster training
         if cache_labels or image_weights:  # cache labels for faster training
-            self.labels = [np.zeros((0, 5))] * n
-            extract_bounding_boxes = False
-            create_datasubset = False
-            pbar = tqdm(self.label_files, desc='Reading labels')
-            nm, nf, ne, ns = 0, 0, 0, 0  # number missing, number found, number empty, number datasubset
-            for i, file in enumerate(pbar):
-                try:
-                    with open(file, 'r') as f:
-                        l = np.array([x.split() for x in f.read().splitlines()], dtype=np.float32)
-                except:
-                    nm += 1  # print('missing labels for image %s' % self.img_files[i])  # file missing
-                    continue
+            # import shelve
+            # if os.path.exists(os.path.join(self.label_shelve, '{}73184.db.dat'.format(phase))):
+            #     with shelve.open(os.path.join(self.label_shelve, '{}73184.db'.format(phase))) as f:
+            #         self.labels = f['res']
+            #     print('load labels from shelve: {}'.format(os.path.join(self.label_shelve, '{}73184.db'.format(phase))))
+            # else:
+                self.labels = [np.zeros((0, 5))] * n
+                extract_bounding_boxes = False
+                create_datasubset = False
+                pbar = tqdm(self.label_files, desc='Reading labels')
+                nm, nf, ne, ns = 0, 0, 0, 0  # number missing, number found, number empty, number datasubset
+                for i, file in enumerate(pbar):
+                    try:
+                        with open(file, 'r') as f:
+                            l = np.array([x.split() for x in f.read().splitlines()], dtype=np.float32)
+                    except:
+                        nm += 1  # print('missing labels for image %s' % self.img_files[i])  # file missing
+                        continue
 
-                if l.shape[0]:
-                    assert l.shape[1] == 5, '> 5 label columns: %s' % file
-                    assert (l >= 0).all(), 'negative labels: %s' % file
-                    assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels: %s' % file
-                    self.labels[i] = l
-                    nf += 1  # file found
+                    if l.shape[0]:
+                        assert l.shape[1] == 5, '> 5 label columns: %s' % file
+                        assert (l >= 0).all(), 'negative labels: %s' % file
+                        assert (l[:, 1:] <= 1).all(), 'non-normalized or out of bounds coordinate labels: %s' % file
+                        self.labels[i] = l
+                        nf += 1  # file found
 
-                    # Create subdataset (a smaller dataset)
-                    if create_datasubset and ns < 1E4:
-                        if ns == 0:
-                            create_folder(path='./datasubset')
-                            os.makedirs('./datasubset/images')
-                        exclude_classes = 43
-                        if exclude_classes not in l[:, 0]:
-                            ns += 1
-                            # shutil.copy(src=self.img_files[i], dst='./datasubset/images/')  # copy image
-                            with open('./datasubset/images.txt', 'a') as f:
-                                f.write(self.img_files[i] + '\n')
+                        # Create subdataset (a smaller dataset)
+                        if create_datasubset and ns < 1E4:
+                            if ns == 0:
+                                create_folder(path='./datasubset')
+                                os.makedirs('./datasubset/images')
+                            exclude_classes = 43
+                            if exclude_classes not in l[:, 0]:
+                                ns += 1
+                                # shutil.copy(src=self.img_files[i], dst='./datasubset/images/')  # copy image
+                                with open('./datasubset/images.txt', 'a') as f:
+                                    f.write(self.img_files[i] + '\n')
 
-                    # Extract object detection boxes for a second stage classifier
-                    if extract_bounding_boxes:
-                        p = Path(self.img_files[i])
-                        img = cv2.imread(str(p))
-                        h, w, _ = img.shape
-                        for j, x in enumerate(l):
-                            f = '%s%sclassifier%s%g_%g_%s' % (p.parent.parent, os.sep, os.sep, x[0], j, p.name)
-                            if not os.path.exists(Path(f).parent):
-                                os.makedirs(Path(f).parent)  # make new output folder
+                        # Extract object detection boxes for a second stage classifier
+                        if extract_bounding_boxes:
+                            p = Path(self.img_files[i])
+                            img = cv2.imread(str(p))
+                            h, w, _ = img.shape
+                            for j, x in enumerate(l):
+                                f = '%s%sclassifier%s%g_%g_%s' % (p.parent.parent, os.sep, os.sep, x[0], j, p.name)
+                                if not os.path.exists(Path(f).parent):
+                                    os.makedirs(Path(f).parent)  # make new output folder
 
-                            b = x[1:] * np.array([w, h, w, h])  # box
-                            b[2:] = b[2:].max()  # rectangle to square
-                            b[2:] = b[2:] * 1.3 + 30  # pad
-                            b = xywh2xyxy(b.reshape(-1, 4)).ravel().astype(np.int)
+                                b = x[1:] * np.array([w, h, w, h])  # box
+                                b[2:] = b[2:].max()  # rectangle to square
+                                b[2:] = b[2:] * 1.3 + 30  # pad
+                                b = xywh2xyxy(b.reshape(-1, 4)).ravel().astype(np.int)
 
-                            b[[0, 2]] = np.clip(b[[0, 2]], 0, w)  # clip boxes outside of image
-                            b[[1, 3]] = np.clip(b[[1, 3]], 0, h)
-                            assert cv2.imwrite(f, img[b[1]:b[3], b[0]:b[2]]), 'Failure extracting classifier boxes'
-                else:
-                    ne += 1  # file empty
+                                b[[0, 2]] = np.clip(b[[0, 2]], 0, w)  # clip boxes outside of image
+                                b[[1, 3]] = np.clip(b[[1, 3]], 0, h)
+                                assert cv2.imwrite(f, img[b[1]:b[3], b[0]:b[2]]), 'Failure extracting classifier boxes'
+                    else:
+                        ne += 1  # file empty
 
-                pbar.desc = 'Reading labels (%g found, %g missing, %g empty for %g images)' % (nf, nm, ne, n)
-            assert nf > 0, 'No labels found. Recommend correcting image and label paths.'
-
+                    pbar.desc = 'Reading labels (%g found, %g missing, %g empty for %g images)' % (nf, nm, ne, n)
+                assert nf > 0, 'No labels found. Recommend correcting image and label paths.'
+                # with shelve.open(os.path.join(self.label_shelve, '{}73184.db'.format(phase))) as f:
+                #     f['res'] = self.labels
+                # print(os.path.join(self.label_shelve, '{}73184.db'.format(phase)))
         # Cache images into memory for faster training (~5GB)
         if cache_images and augment:  # if training
-            for i in tqdm(range(min(len(self.img_files), 10000)), desc='Reading images'):  # max 10k images
+            # import shelve
+            # if os.path.exists('/data/det/out/yoloDiDi/img73184_imgs_shelve/img73184.db.dat') and \
+            #     os.path.exists('/data/det/out/yoloDiDi/img73184_imgs_shelve/img73184.db.bak') and \
+            #     os.path.exists('/data/det/out/yoloDiDi/img73184_imgs_shelve/img73184.db.dir'):
+            #     with shelve.open('/data/det/out/yoloDiDi/img73184_imgs_shelve/img73184.db') as f:
+            #         self.imgs = f['res']
+            #     print('load labels from shelve!')
+            # else:
+            for i in tqdm(range(min(len(self.img_files), 4493)), desc='Reading images'):  # max 10k images
                 img_path = self.img_files[i]
                 img = cv2.imread(img_path)  # BGR
                 assert img is not None, 'Image Not Found ' + img_path
@@ -383,6 +407,20 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                     h, w, _ = img.shape
                     img = cv2.resize(img, (int(w * r), int(h * r)), interpolation=cv2.INTER_LINEAR)  # or INTER_AREA
                 self.imgs[i] = img
+                # with shelve.open('/data/det/out/yoloDiDi/img73184_imgs_shelve/img73184.db') as f:
+                #     f['res'] = self.imgs
+                #     print('save shelve: {}'.format('/data/det/out/yoloDiDi/img73184_imgs_shelve/img73184.db'))
+
+        elif use_lmdb:
+            if phase == 'train':
+                db_path = '/data/det/out/yoloDiDi/img73184_lmdb_train'
+            elif phase == 'test':
+                db_path = '/data/det/out/yoloDiDi/img73184_lmdb_test'
+            db = lmdb.open(db_path, readonly=True)
+            self.txn = db.begin()
+            from .lmdb_processor import datum_pb2
+            self.datum = datum_pb2.Datum()
+            print('use lmdb:{}'.format(db_path))
 
         # Detect corrupted images https://medium.com/joelthchao/programmatically-detect-corrupted-image-8c1b2006c3d3
         detect_corrupted_images = False
@@ -397,21 +435,23 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     def __len__(self):
         return len(self.img_files)
 
+    def _datum_to_array(self, datum):
+        return np.fromstring(datum.data, dtype=np.uint8).reshape(datum.width, datum.height, datum.channels)
+
     # def __iter__(self):
     #     self.count = -1
     #     print('ran dataset iter')
     #     #self.shuffled_vector = np.random.permutation(self.nF) if self.augment else np.arange(self.nF)
     #     return self
-
+    # @profile(precision=4, stream=open('memory_profiler.log', 'w+'))
     def __getitem__(self, index):
         if self.image_weights:
             index = self.indices[index]
 
-        img_path = self.img_files[index]
+        # img_path = self.img_files[index]
         label_path = self.label_files[index]
 
-        mosaic = True and self.augment  # load 4 images at a time into a mosaic (only during training)
-        if mosaic:
+        if self.mosaic:
             # Load mosaic
             img, labels = load_mosaic(self, index)
             h, w, _ = img.shape
@@ -448,18 +488,17 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             augment_hsv(img, hgain=self.hyp['hsv_h'], sgain=self.hyp['hsv_s'], vgain=self.hyp['hsv_v'])
 
             # Augment imagespace
-            g = 0.0 if mosaic else 1.0  # do not augment mosaics
-            hyp = self.hyp
+            g = 0.0 if self.mosaic else 1.0  # do not augment mosaics
             img, labels = random_affine(img, labels,
-                                        degrees=hyp['degrees'] * g,
-                                        translate=hyp['translate'] * g,
-                                        scale=hyp['scale'] * g,
-                                        shear=hyp['shear'] * g)
+                                        degrees=self.hyp['degrees'] * g,
+                                        translate=self.hyp['translate'] * g,
+                                        scale=self.hyp['scale'] * g,
+                                        shear=self.hyp['shear'] * g)
 
             # Apply cutouts
             # if random.random() < 0.9:
             #     labels = cutout(img, labels)
-
+            del g
         nL = len(labels)  # number of labels
         if nL:
             # convert xyxy to xywh
@@ -471,18 +510,16 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         if self.augment:
             # random left-right flip
-            lr_flip = True
-            if lr_flip and random.random() < 0.5:
+            if random.random() < 0.5:
                 img = np.fliplr(img)
                 if nL:
                     labels[:, 1] = 1 - labels[:, 1]
-
-            # random up-down flip
-            ud_flip = False
-            if ud_flip and random.random() < 0.5:
-                img = np.flipud(img)
-                if nL:
-                    labels[:, 2] = 1 - labels[:, 2]
+            # # random up-down flip
+            # ud_flip = False
+            # if ud_flip and random.random() < 0.5:
+            #     img = np.flipud(img)
+            #     if nL:
+            #         labels[:, 2] = 1 - labels[:, 2]
 
         labels_out = torch.zeros((nL, 6))
         if nL:
@@ -492,8 +529,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img, dtype=np.float32)  # uint8 to float32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
-
-        return torch.from_numpy(img), labels_out, img_path, (h, w)
+        del label_path
+        del nL
+        return torch.from_numpy(img), labels_out, self.img_files[index], (h, w)
 
     @staticmethod
     def collate_fn(batch):
@@ -503,9 +541,50 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         return torch.stack(img, 0), torch.cat(label, 0), path, hw
 
 
+class Sample:
+    def __init__(self, txn, index):
+        self.txn = txn
+        self.index = index
+    def __enter__(self):
+        # with self.db.begin() as txn:
+        self.data = datum_pb2.Datum()
+        self.data.ParseFromString(self.txn.get('{:0>8d}'.format(self.index).encode()))
+        return datum_to_array(self.data)
+
+
+    def __exit__(self, *exc_info):
+        # self.free()
+        # self.data.free()
+        del self.data
+        del self
+        return None
+
+
+# def get_sample(datum):
+#     datum = self.Datum()
+#     return datum_to_array(datum)
+
+def datum_to_array(datum):
+    return np.fromstring(datum.data, dtype=np.uint8).reshape(datum.width, datum.height, datum.channels)
+
+# @profile(precision=4, stream=open('memory_profiler.log','w+'))
 def load_image(self, index):
     # loads 1 image from dataset
     img = self.imgs[index]
+    if img is not None:
+        return img
+    if self.lmdb:
+        value = self.txn.get('{:0>8d}'.format(index).encode())
+        self.datum.ParseFromString(value)
+        img = self._datum_to_array(self.datum)
+        r = self.img_size / max(img.shape)  # size ratio
+        if self.augment and r < 1.0:  # if training (NOT testing), downsize to inference shape
+            h, w, _ = img.shape
+            img = cv2.resize(img, (int(w * r), int(h * r)), interpolation=cv2.INTER_LINEAR)
+        return img
+    elif self.img_shelve:
+        with shelve.open(os.path.join(self.img_shelve, str(index))) as f:
+            return f['res']
     if img is None:
         img_path = self.img_files[index]
         img = cv2.imread(img_path)  # BGR
@@ -539,7 +618,7 @@ def augment_hsv(img, hgain=0.5, sgain=0.5, vgain=0.5):
 #     img_hsv[:, :, 2] = V if b < 1 else V.clip(None, 255)
 #     cv2.cvtColor(img_hsv, cv2.COLOR_HSV2BGR, dst=img)  # no return needed
 
-
+# @profile(precision=4, stream=open('memory_profiler.log','w+'))
 def load_mosaic(self, index):
     # loads images in a mosaic
 
@@ -588,6 +667,8 @@ def load_mosaic(self, index):
                 labels[:, 4] = h * (x[:, 2] + x[:, 4] / 2) + padh
 
             labels4.append(labels)
+            del x
+        del label_path, padw, padh, h, w
     if len(labels4):
         labels4 = np.concatenate(labels4, 0)
 
@@ -603,7 +684,7 @@ def load_mosaic(self, index):
     img4 = img4[a:a + s, a:a + s]
     if len(labels4):
         labels4[:, 1:] -= a
-
+    del a, s, xc, yc, indices
     return img4, labels4
 
 
@@ -763,8 +844,9 @@ def cutout(image, labels):
 
 
 def convert_images2bmp():
+    anno_path = '/data/det/out/Annotations'
     # cv2.imread() jpg at 230 img/s, *.bmp at 400 img/s
-    for path in ['../coco/images/val2014/', '../coco/images/train2014/']:
+    for path in ['/data/det/out/images']:
         folder = os.sep + Path(path).name
         output = path.replace(folder, folder + 'bmp')
         if os.path.exists(output):
@@ -772,16 +854,19 @@ def convert_images2bmp():
         os.makedirs(output)  # make new output folder
 
         for f in tqdm(glob.glob('%s*.jpg' % path)):
+            if not os.path.exists(f.replace('images', 'Annotations').replace('.jpg', '.xml')):
+                print('xml not exists: {}'.format(f.replace('images', 'Annotations').replace('.jpg', '.xml')))
+                continue
             save_name = f.replace('.jpg', '.bmp').replace(folder, folder + 'bmp')
             cv2.imwrite(save_name, cv2.imread(f))
 
-    for label_path in ['../coco/trainvalno5k.txt', '../coco/5k.txt']:
-        with open(label_path, 'r') as file:
-            lines = file.read()
-        lines = lines.replace('2014/', '2014bmp/').replace('.jpg', '.bmp').replace(
-            '/Users/glennjocher/PycharmProjects/', '../')
-        with open(label_path.replace('5k', '5k_bmp'), 'w') as file:
-            file.write(lines)
+    # for label_path in ['../coco/trainvalno5k.txt', '../coco/5k.txt']:
+    #     with open(label_path, 'r') as file:
+    #         lines = file.read()
+    #     lines = lines.replace('2014/', '2014bmp/').replace('.jpg', '.bmp').replace(
+    #         '/Users/glennjocher/PycharmProjects/', '../')
+    #     with open(label_path.replace('5k', '5k_bmp'), 'w') as file:
+    #         file.write(lines)
 
 
 def create_folder(path='./new_folder'):
@@ -789,3 +874,7 @@ def create_folder(path='./new_folder'):
     if os.path.exists(path):
         shutil.rmtree(path)  # delete output folder
     os.makedirs(path)  # make new output folder
+
+
+if __name__ == '__main__':
+    convert_images2bmp()

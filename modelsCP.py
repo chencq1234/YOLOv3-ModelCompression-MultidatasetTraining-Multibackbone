@@ -1,18 +1,43 @@
 # Author:LiPu
-# import torch.nn.functional as F
-# import torch.nn as nn
-# import torch
-from utils.google_utils import *
-from utils.parse_config import *
-from utils.utils import *
-from utils.quantized import *
+import torch.nn.functional as F
+import torch.nn as nn
+import torch
+# from utils.google_utils import *
+# from utils.parse_config import *
+# from utils.utils import *
+# from utils.quantized import *
 import copy
 import os
-
+from collections import OrderedDict
 ONNX_EXPORT = False
-# ONNX_EXPORT = True
-half_filters = False
-# half_filters = True
+
+import numpy as np
+
+
+def parse_model_cfg(path):
+    # Parses the yolo-v3 layer configuration file and returns module definitions
+    file = open(path, 'r')
+    lines = file.read().split('\n')
+    lines = [x for x in lines if x and not x.startswith('#')]
+    lines = [x.rstrip().lstrip() for x in lines]  # get rid of fringe whitespaces
+    mdefs = []  # module definitions
+    for line in lines:
+        if line.startswith('['):  # This marks the start of a new block
+            mdefs.append({})
+            mdefs[-1]['type'] = line[1:-1].rstrip()
+            if mdefs[-1]['type'] == 'convolutional':
+                mdefs[-1]['batch_normalize'] = 0  # pre-populate with zeros (may be overwritten later)
+        else:
+            key, val = line.split("=")
+            key = key.rstrip()
+
+            if 'anchors' in key:
+                mdefs[-1][key] = np.array([float(x) for x in val.split(',')]).reshape((-1, 2))  # np anchors
+            else:
+                mdefs[-1][key] = val.strip()
+
+    return mdefs
+
 
 def create_modules(module_defs, img_size, arc, quantized, qlayers):
     # Constructs module list of layer blocks from module configuration in module_defs
@@ -28,10 +53,7 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
 
         if mdef['type'] == 'convolutional':
             bn = int(mdef['batch_normalize'])
-            dilation = int(mdef['dilation']) if 'dilation' in mdef['type'] else 1
             filters = int(mdef['filters'])
-            if filters % 2 == 0 and half_filters:
-                filters = int(filters / 2)
             kernel_size = int(mdef['size'])
             pad = (kernel_size - 1) // 2 if int(mdef['pad']) else 0
             # 量化
@@ -50,15 +72,10 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
                         modules.add_module('activation', nn.LeakyReLU(0.1, inplace=True))
                         # modules.add_module('activation', nn.PReLU(num_parameters=1, init=0.10))
                         # modules.add_module('activation', Swish())
-                    elif mdef['activation'] == 'relu6':
+                    if mdef['activation'] == 'relu6':
                         modules.add_module('activation', relu6())
-                    elif mdef['activation'] == 'h_swish':
+                    if mdef['activation'] == 'h_swish':
                         modules.add_module('activation', h_swish())
-                    elif mdef['activation'] == 'swish':
-                        modules.add_module('activation', Swish())
-                    elif mdef['activation'] == 'mish':
-                        modules.add_module('activation', Mish())
-
                 # BWN量化
                 elif quantized == 1:
                     modules.add_module('Conv2d', BWNConv2d(in_channels=output_filters[-1],
@@ -82,8 +99,7 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
                                                        out_channels=filters,
                                                        kernel_size=kernel_size,
                                                        stride=int(mdef['stride']),
-                                                       padding=pad+1 if dilation==2 else pad,
-                                                       dilation=dilation,
+                                                       padding=pad,
                                                        bias=not bn))
                 if bn:
                     modules.add_module('BatchNorm2d', nn.BatchNorm2d(filters, momentum=0.1))
@@ -98,8 +114,6 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
         elif mdef['type'] == 'depthwise':
             bn = int(mdef['batch_normalize'])
             filters = int(mdef['filters'])
-            if half_filters:
-                filters = int(filters / 2)
             kernel_size = int(mdef['size'])
             pad = (kernel_size - 1) // 2 if int(mdef['pad']) else 0
             modules.add_module('DepthWise2d', nn.Conv2d(in_channels=output_filters[-1],
@@ -130,11 +144,9 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
                 modules = maxpool
         elif mdef['type'] == 'se':
             filters = int(mdef['filters'])
-            if half_filters:
-                filters = int(filters / 2)
             modules.add_module('se', SE(channel=filters))
         elif mdef['type'] == 'upsample':
-            modules = nn.Upsample(scale_factor=int(mdef['stride']), mode='bilinear', align_corners=False)
+            modules = nn.Upsample(scale_factor=int(mdef['stride']), mode='bilinear')
         elif mdef['type'] == 'route':  # nn.Sequential() placeholder for 'route' layer
             layers = [int(x) for x in mdef['layers'].split(',')]
             filters = sum([output_filters[i + 1 if i > 0 else i] for i in layers])
@@ -142,10 +154,7 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
             # if mdef[i+1]['type'] == 'reorg3d':
             #     modules = nn.Upsample(scale_factor=1/float(mdef[i+1]['stride']), mode='nearest')  # reorg3d
         elif mdef['type'] == 'shortcut':  # nn.Sequential() placeholder for 'shortcut' layer
-            if half_filters:
-                filters = output_filters[int(int(mdef['from'])/2)]
-            else:
-                filters = output_filters[int(mdef['from'])]
+            filters = output_filters[int(mdef['from'])]
             layer = int(mdef['from'])
             routs.extend([i + layer if layer < 0 else layer])
         elif mdef['type'] == 'reorg3d':  # yolov3-spp-pan-scale
@@ -197,6 +206,7 @@ def create_modules(module_defs, img_size, arc, quantized, qlayers):
     return module_list, routs
 
 
+
 class Swish(nn.Module):
     def __init__(self):
         super(Swish, self).__init__()
@@ -204,9 +214,6 @@ class Swish(nn.Module):
     def forward(self, x):
         return x * torch.sigmoid(x)
 
-class Mish(nn.Module):  # https://github.com/digantamisra98/Mish
-    def forward(self, x):
-        return x * F.softplus(x).tanh()
 
 class relu6(nn.Module):
     def __init__(self):
@@ -391,7 +398,8 @@ class Darknet(nn.Module):
 
     def fuse(self):
         # Fuse Conv2d + BatchNorm2d layers throughout model
-        fused_list = nn.ModuleList()
+        # fused_list = nn.ModuleList()
+        fused_list = []
         for a in list(self.children())[0]:
             if isinstance(a, nn.Sequential):
                 for i, b in enumerate(a):
@@ -405,52 +413,6 @@ class Darknet(nn.Module):
         self.module_list = fused_list
         # model_info(self)  # yolov3-spp reduced from 225 to 152 layers
 
-    def save_weights(self, path='model.weights', cutoff=-1):
-        # Converts a PyTorch model to Darket format (*.pt to *.weights)
-        # Note: Does not work if model.fuse() is applied
-        with open(path, 'wb') as f:
-            # Write Header https://github.com/AlexeyAB/darknet/issues/2914#issuecomment-496675346
-            self.version.tofile(f)  # (int32) version info: major, minor, revision
-            self.seen.tofile(f)  # (int64) number of images seen during training
-
-            # Iterate through layers
-            for i, (mdef, module) in enumerate(zip(self.module_defs[:cutoff], self.module_list[:cutoff])):
-                if mdef['type'] == 'convolutional':
-                    conv_layer = module[0]
-                    # If batch norm, load bn first
-                    if mdef['batch_normalize'] == '1':
-                        bn_layer = module[1]
-                        bn_layer.bias.data.cpu().numpy().tofile(f)
-                        bn_layer.weight.data.cpu().numpy().tofile(f)
-                        bn_layer.running_mean.data.cpu().numpy().tofile(f)
-                        bn_layer.running_var.data.cpu().numpy().tofile(f)
-                    # Load conv bias
-                    else:
-                        conv_layer.bias.data.cpu().numpy().tofile(f)
-                    # Load conv weights
-                    conv_layer.weight.data.cpu().numpy().tofile(f)
-                elif mdef['type'] == 'depthwise':
-                    depthwise_layer = module[0]
-                    # If batch norm, load bn first
-                    if mdef['batch_normalize'] == '1':
-                        bn_layer = module[1]
-                        bn_layer.bias.data.cpu().numpy().tofile(f)
-                        bn_layer.weight.data.cpu().numpy().tofile(f)
-                        bn_layer.running_mean.data.cpu().numpy().tofile(f)
-                        bn_layer.running_var.data.cpu().numpy().tofile(f)
-                    # Load conv bias
-                    else:
-                        depthwise_layer.bias.data.cpu().numpy().tofile(f)
-                    # Load conv weights
-                    depthwise_layer.weight.data.cpu().numpy().tofile(f)
-                elif mdef['type'] == 'se':
-                    se_layer = module[0]
-                    fc = se_layer.fc
-                    fc1 = fc[0]
-                    fc2 = fc[2]
-                    fc1.weight.data.cpu().numpy().tofile(f)
-                    fc2.weight.data.cpu().numpy().tofile(f)
-
 
 def get_yolo_layers(model):
     return [i for i, x in enumerate(model.module_defs) if x['type'] == 'yolo']  # [82, 94, 106] for yolov3
@@ -462,8 +424,9 @@ def create_grids(self, img_size=416, ng=(13, 13), device='cpu', type=torch.float
     self.stride = self.img_size / max(ng)
 
     # build xy offsets
-    yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
-    self.grid_xy = torch.stack((xv, yv), 2).to(device).type(type).view((1, 1, ny, nx, 2))
+    xv, yv = np.meshgrid(np.arange(nx), np.arange(ny))
+    # yv, xv = torch.meshgrid([torch.arange(ny), torch.arange(nx)])
+    self.grid_xy = torch.stack((torch.Tensor(xv).long(), torch.Tensor(yv).long()), 2).to(device).type(type).view((1, 1, ny, nx, 2))
 
     # build wh gains
     self.anchor_vec = self.anchors.to(device) / self.stride
@@ -586,6 +549,52 @@ def load_darknet_weights(self, weights, cutoff=-1, train=False, pt=False):
     return cutoff
 
 
+def save_weights(self, path='model.weights', cutoff=-1):
+    # Converts a PyTorch model to Darket format (*.pt to *.weights)
+    # Note: Does not work if model.fuse() is applied
+    with open(path, 'wb') as f:
+        # Write Header https://github.com/AlexeyAB/darknet/issues/2914#issuecomment-496675346
+        self.version.tofile(f)  # (int32) version info: major, minor, revision
+        self.seen.tofile(f)  # (int64) number of images seen during training
+
+        # Iterate through layers
+        for i, (mdef, module) in enumerate(zip(self.module_defs[:cutoff], self.module_list[:cutoff])):
+            if mdef['type'] == 'convolutional':
+                conv_layer = module[0]
+                # If batch norm, load bn first
+                if mdef['batch_normalize'] == '1':
+                    bn_layer = module[1]
+                    bn_layer.bias.data.cpu().numpy().tofile(f)
+                    bn_layer.weight.data.cpu().numpy().tofile(f)
+                    bn_layer.running_mean.data.cpu().numpy().tofile(f)
+                    bn_layer.running_var.data.cpu().numpy().tofile(f)
+                # Load conv bias
+                else:
+                    conv_layer.bias.data.cpu().numpy().tofile(f)
+                # Load conv weights
+                conv_layer.weight.data.cpu().numpy().tofile(f)
+            elif mdef['type'] == 'depthwise':
+                depthwise_layer = module[0]
+                # If batch norm, load bn first
+                if mdef['batch_normalize'] == '1':
+                    bn_layer = module[1]
+                    bn_layer.bias.data.cpu().numpy().tofile(f)
+                    bn_layer.weight.data.cpu().numpy().tofile(f)
+                    bn_layer.running_mean.data.cpu().numpy().tofile(f)
+                    bn_layer.running_var.data.cpu().numpy().tofile(f)
+                # Load conv bias
+                else:
+                    depthwise_layer.bias.data.cpu().numpy().tofile(f)
+                # Load conv weights
+                depthwise_layer.weight.data.cpu().numpy().tofile(f)
+            elif mdef['type'] == 'se':
+                se_layer = module[0]
+                fc = se_layer.fc
+                fc1 = fc[0]
+                fc2 = fc[2]
+                fc1.weight.data.cpu().numpy().tofile(f)
+                fc2.weight.data.cpu().numpy().tofile(f)
+
 
 def convert(cfg='cfg/yolov3-spp.cfg', weights='weights/yolov3-spp.weights'):
     # Converts between PyTorch and Darknet format per extension (i.e. *.weights convert to *.pt and vice versa)
@@ -594,12 +603,10 @@ def convert(cfg='cfg/yolov3-spp.cfg', weights='weights/yolov3-spp.weights'):
     # Initialize model
     model = Darknet(cfg)
 
-
     # Load weights and save
     if weights.endswith('.pt'):  # if PyTorch format
-        if os.path.isfile(weights):
-            model.load_state_dict(torch.load(weights, map_location='cpu')['model'])
-        model.save_weights(path=weights.replace('.pt', '.weights'), cutoff=-1)
+        model.load_state_dict(torch.load(weights, map_location='cpu')['model'])
+        save_weights(model, path='converted.weights', cutoff=-1)
         print("Success: converted '%s' to 'converted.weights'" % weights)
 
     elif weights.endswith('.weights'):  # darknet format
@@ -669,40 +676,31 @@ def save_as_onnx(model, save_name):
     print("----------------------------------------------------------------")
     print("save model to onnx:%s" % os.path.abspath(save_onnx_path))
 
+def remove_prefix(state_dict, prefix):
+    ''' Old style model is stored with all names of parameters sharing common prefix 'module.' '''
+    print('remove prefix \'{}\''.format(prefix))
+    f = lambda x: x.split(prefix, 1)[-1] if x.startswith(prefix) else x
+    return {f(key): value for key, value in state_dict.items()}
+
 if __name__ == '__main__':
     # net = Darknet('cfg/yolov3tiny-mobilenet-small/yolov3tiny-mobilenet-small-test4cls.cfg',
-    net = Darknet('cfg/yolov3/yolov3-spp-lite-car.cfg', arc='default')
-    # net = Darknet('cfg/yolov3/yolov3-spp-lite-car.cfg', arc='default')
-    # net = Darknet('cfg/yolov3/yolov3carSM.cfg', arc='default')
-    # net = Darknet('cfg/yolov3tiny/yolov3-tinycar.cfg', arc='default')
-    # net.load_state_dict(torch.load('/disk/ADAS/DetSaves/yoloSave/20200428_2050/best.pt',
-    #                                  map_location='cpu')['model'])
-    # convert('cfg/yolov3-mobilenet/yolov3-mobilenet-car.cfg', weights='weights/20200428_2050/last.pt')
-    # convert('cfg/yolov3tiny-mobilenet-small/yolov3tiny-mobilenet-small-didi8cls.cfg',
-    # convert('cfg/yolov3/yolov3-bdd100k.cfg',
-    # convert('cfg/yolov3/yolov4relu-car.cfg',
-
-    # convert('cfg/yolov3/yolov3-spp-lite-car.cfg',
-    #         weights='weights/yolov3SM/sppl.pt')
-
-    # convert('cfg/yolov3tiny-mobilenet-small/yolov3tiny-mobilenet-small-didi8cls.cfg',
-    #         weights='weights/yolov3SM/v3mbs.pt')
-
-    # convert('cfg/yolov3tiny/yolov3-tiny3car.cfg',
-    #         weights='weights/yolov3SM/v33.pt')
-
-    # convert('cfg/yolov3/yolov3car.cfg',
-    #         weights='/data/det/out/DetSaves/ysave/20200511_0917/v3car.pt')
-    # convert('cfg/yolov3/yolov3car.cfg',
-    #         weights='weights/yolov3SM/v3car.pt')
-
-    # convert('cfg/yolov3/yolov3carSM.cfg',
-    #         weights='weights/yolov3SM/backup45.pt')
-    # convert('cfg/yolov3/yolov3-spp-lite-car.cfg',
-    #         weights='weights/20200508_2334/last.pt')
-
-            # weights='weights/20200507_0055/best2.pt')
-    from torchstat import stat
-    stat(net, (3, 416, 416))
+    net = Darknet('cfg/yolov3-mobilenet/yolov3-mobilenet-car.cfg',
+            arc='default', quantized=-1, qlayers=-1)
+    net.train(False)
+    dummy_input = torch.randn(1, 3, 640, 384)
+    # model_path = 'weights/20200428_2050/best.pt'
+    model_path = 'test.pth'
+    pretrained_dict = torch.load(model_path, map_location=lambda storage, loc: storage)
+    if "state_dict" in pretrained_dict.keys():
+        pretrained_dict = remove_prefix(pretrained_dict['state_dict'], 'module.')
+    else:
+        pretrained_dict = remove_prefix(pretrained_dict, 'module.')
+    # net.load_state_dict(pretrained_dict)
+    # net.load_state_dict(torch.load('/disk/ADAS/DetSaves/yoloSave/20200428_2050/best.pt', map_location=lambda storage, loc: storage)['model'])
+    net(dummy_input)
+    # torch.save(net.state_dict(), 'test.pth')
+    save_weights(net, path='converted.weights', cutoff=-1)
+    # from torchstat import stat
+    # stat(net, (3, 416, 416))
     # save_as_onnx(net, 'weights/yolov3-mobilenet-car.onnx')
     # save_as_onnx(net, 'weights/yolov3tiny-mobilenet-small-test4cls.onnx')

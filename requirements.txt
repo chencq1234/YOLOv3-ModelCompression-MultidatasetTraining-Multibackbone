@@ -8,6 +8,8 @@ tqdm
 tb-nightly
 future
 Pillow
+torchsummary
+terminaltables
 
 # Equivalent conda commands ----------------------------------------------------
 # conda update -n base -c defaults conda
@@ -15,3 +17,5 @@ Pillow
 # conda install -yc conda-forge scikit-image tensorboard pycocotools
 # conda install -yc spyder-ide spyder-line-profiler
 # conda install -yc pytorch pytorch torchvision
+# pip install torchsummary
+# pip install terminaltables

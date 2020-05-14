@@ -45,7 +45,7 @@ def test(cfg,
             model = nn.DataParallel(model)
     else:
         device = next(model.parameters()).device  # get model device
-        verbose = False
+        verbose = True
 
     # Configure run
     data = parse_data_cfg(data)
@@ -54,11 +54,12 @@ def test(cfg,
     names = load_classes(data['names'])  # class names
 
     # Dataloader
-    dataset = LoadImagesAndLabels(test_path, img_size, batch_size)
+    dataset = LoadImagesAndLabels(test_path, img_size, batch_size, use_lmdb=True,
+                                  phase='test', cache_labels=True)
     dataloader = DataLoader(dataset,
                             batch_size=batch_size,
                             num_workers=min([os.cpu_count(), batch_size, 16]),
-                            pin_memory=True,
+                            pin_memory=False,
                             collate_fn=dataset.collate_fn)
 
     seen = 0
@@ -204,16 +205,16 @@ def test(cfg,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(prog='test.py')
-    parser.add_argument('--cfg', type=str, default='cfg/yolov3-spp.cfg', help='cfg file path')
-    parser.add_argument('--data', type=str, default='data/coco.data', help='coco.data file path')
-    parser.add_argument('--weights', type=str, default='weights/yolov3-spp.weights', help='path to weights file')
-    parser.add_argument('--batch_size', type=int, default=16, help='size of each image batch')
+    parser.add_argument('--cfg', type=str, default='cfg/yolov3/yolov3car.cfg', help='cfg file path')
+    parser.add_argument('--data', type=str, default='cfg/didi8cls.data', help='coco.data file path')
+    parser.add_argument('--weights', type=str, default='/data/det/out/DetSaves/ysave/20200511_0917/backup20.pt', help='path to weights file')
+    parser.add_argument('--batch_size', type=int, default=80, help='size of each image batch')
     parser.add_argument('--img_size', type=int, default=416, help='inference size (pixels)')
     parser.add_argument('--iou_thres', type=float, default=0.5, help='iou threshold required to qualify as detected')
     parser.add_argument('--conf_thres', type=float, default=0.001, help='object confidence threshold')
     parser.add_argument('--nms_thres', type=float, default=0.5, help='iou threshold for non-maximum suppression')
     parser.add_argument('--save_json', action='store_true', help='save a cocoapi-compatible JSON results file')
-    parser.add_argument('--device', default='', help='device id (i.e. 0 or 0,1) or cpu')
+    parser.add_argument('--device', default='4,5,6,7', help='device id (i.e. 0 or 0,1) or cpu')
     parser.add_argument('--quantized', type=int, default=-1,
                         help='0:quantization way one Ternarized weight and 8bit activation')
     parser.add_argument('--qlayers', type=int, default=-1,

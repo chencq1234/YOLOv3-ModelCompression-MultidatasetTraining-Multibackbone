@@ -1,0 +1,4 @@
+classes= 8
+train=/data/det/out/yoloDiDi/40yolo/train.txt
+valid=/data/det/out/yoloDiDi/40yolo/test.txt
+names=/data/det/out/yoloDiDi/40yolo/didi8cls.names
