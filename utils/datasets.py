@@ -15,7 +15,7 @@ from torch.utils.data import Dataset
 from tqdm import tqdm
 import shelve
 from utils.utils import xyxy2xywh, xywh2xyxy
-from memory_profiler import profile
+# from memory_profiler import profile
 from .lmdb_processor import datum_pb2
 img_formats = ['.bmp', '.jpg', '.jpeg', '.png', '.tif']
 vid_formats = ['.mov', '.avi', '.mp4']
@@ -103,7 +103,8 @@ class LoadImages:  # for inference
         img = letterbox(img0, new_shape=self.img_size)[0]
 
         # Normalize RGB
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
+        # img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB
+        img = img.transpose(2, 0, 1)  # BGR to RGB
         img = np.ascontiguousarray(img, dtype=np.float16 if self.half else np.float32)  # uint8 to fp16/fp32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
 
@@ -259,10 +260,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
     def __init__(self, path, img_size=416, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_labels=False, cache_images=False, use_lmdb=False, phase='train', img_shelve=False):
         self.lmdb = use_lmdb
-        self.label_shelve = '/data/det/out/yoloDiDi/{}73184_labels_shelve'.format(phase) if cache_labels else False
+        self.label_shelve = '/data/det/out/yoloDiDi/40yolo/{}73184_labels_shelve'.format(phase) if cache_labels else False
         if self.label_shelve:
             os.makedirs(self.label_shelve, exist_ok=True)
-        self.img_shelve = '/data/det/out/yoloDiDi/img73184_shelve_{}'.format(phase) if img_shelve else False
+        self.img_shelve = '/data/det/out/yoloDiDi/40yolo/img73184_shelve_{}'.format(phase) if img_shelve else False
         path = str(Path(path))  # os-agnostic
         with open(path, 'r') as f:
             self.img_files = [x.replace('/', os.sep) for x in f.read().splitlines()  # os-agnostic
@@ -324,11 +325,11 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         self.labels = [None] * n
         # if 0:  # cache labels for faster training
         if cache_labels or image_weights:  # cache labels for faster training
-            # import shelve
-            # if os.path.exists(os.path.join(self.label_shelve, '{}73184.db.dat'.format(phase))):
-            #     with shelve.open(os.path.join(self.label_shelve, '{}73184.db'.format(phase))) as f:
-            #         self.labels = f['res']
-            #     print('load labels from shelve: {}'.format(os.path.join(self.label_shelve, '{}73184.db'.format(phase))))
+            import shelve
+            if os.path.exists(os.path.join(self.label_shelve, '{}73184.db.dat'.format(phase))):
+                with shelve.open(os.path.join(self.label_shelve, '{}73184.db'.format(phase))) as f:
+                    self.labels = f['res']
+                print('load labels from shelve: {}'.format(os.path.join(self.label_shelve, '{}73184.db'.format(phase))))
             # else:
                 self.labels = [np.zeros((0, 5))] * n
                 extract_bounding_boxes = False
@@ -385,9 +386,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
                     pbar.desc = 'Reading labels (%g found, %g missing, %g empty for %g images)' % (nf, nm, ne, n)
                 assert nf > 0, 'No labels found. Recommend correcting image and label paths.'
-                # with shelve.open(os.path.join(self.label_shelve, '{}73184.db'.format(phase))) as f:
-                #     f['res'] = self.labels
-                # print(os.path.join(self.label_shelve, '{}73184.db'.format(phase)))
+                with shelve.open(os.path.join(self.label_shelve, '{}73184.db'.format(phase))) as f:
+                    f['res'] = self.labels
+                print(os.path.join(self.label_shelve, '{}73184.db'.format(phase)))
         # Cache images into memory for faster training (~5GB)
         if cache_images and augment:  # if training
             # import shelve
@@ -526,7 +527,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             labels_out[:, 1:] = torch.from_numpy(labels)
 
         # Normalize
-        img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
+        img = img.transpose(2, 0, 1)  # BGR 2 to 3x416x416
         img = np.ascontiguousarray(img, dtype=np.float32)  # uint8 to float32
         img /= 255.0  # 0 - 255 to 0.0 - 1.0
         del label_path
@@ -573,19 +574,19 @@ def load_image(self, index):
     img = self.imgs[index]
     if img is not None:
         return img
-    if self.lmdb:
-        value = self.txn.get('{:0>8d}'.format(index).encode())
-        self.datum.ParseFromString(value)
-        img = self._datum_to_array(self.datum)
-        r = self.img_size / max(img.shape)  # size ratio
-        if self.augment and r < 1.0:  # if training (NOT testing), downsize to inference shape
-            h, w, _ = img.shape
-            img = cv2.resize(img, (int(w * r), int(h * r)), interpolation=cv2.INTER_LINEAR)
-        return img
-    elif self.img_shelve:
-        with shelve.open(os.path.join(self.img_shelve, str(index))) as f:
-            return f['res']
-    if img is None:
+    # if self.lmdb:
+    #     value = self.txn.get('{:0>8d}'.format(index).encode())
+    #     self.datum.ParseFromString(value)
+    #     img = self._datum_to_array(self.datum)
+    #     r = self.img_size / max(img.shape)  # size ratio
+    #     if self.augment and r < 1.0:  # if training (NOT testing), downsize to inference shape
+    #         h, w, _ = img.shape
+    #         img = cv2.resize(img, (int(w * r), int(h * r)), interpolation=cv2.INTER_LINEAR)
+    #     return img
+    # elif self.img_shelve:
+    #     with shelve.open(os.path.join(self.img_shelve, str(index))) as f:
+    #         return f['res']
+    elif img is None:
         img_path = self.img_files[index]
         img = cv2.imread(img_path)  # BGR
         assert img is not None, 'Image Not Found ' + img_path
@@ -668,7 +669,7 @@ def load_mosaic(self, index):
 
             labels4.append(labels)
             del x
-        del label_path, padw, padh, h, w
+        del label_path, padw, padh, h, w, img
     if len(labels4):
         labels4 = np.concatenate(labels4, 0)
 

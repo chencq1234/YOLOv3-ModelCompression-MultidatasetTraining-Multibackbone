@@ -9,7 +9,7 @@ from models import *
 from utils.datasets import *
 from utils.utils import *
 from utils.prune_utils import *
-from memory_profiler import profile
+# from memory_profiler import profile
 mixed_precision = True
 try:  # Mixed precision training https://github.com/NVIDIA/apex
     from apex import amp
@@ -272,9 +272,9 @@ def train():
     t0 = time.time()
     print('Starting %s for %g epochs...' % ('prebias' if opt.prebias else 'training', epochs))
     for epoch in range(start_epoch, epochs):  # epoch ------------------------------------------------------------------
-        os.system("echo 1 > /proc/sys/vm/drop_caches")
-        os.system("echo 2 > /proc/sys/vm/drop_caches")
-        os.system("echo 3 > /proc/sys/vm/drop_caches")
+        # os.system("echo 1 > /proc/sys/vm/drop_caches")
+        # os.system("echo 2 > /proc/sys/vm/drop_caches")
+        # os.system("echo 3 > /proc/sys/vm/drop_caches")
 
         model.train()
         print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'targets', 'img_size'))
@@ -490,9 +490,11 @@ def prebias():
 if __name__ == '__main__':
     # os.system("swapoff -a")
     # os.system("swapon -a")
+    times = 3
+    hyp['lr0'] *= times
     parser = argparse.ArgumentParser()
-    parser.add_argument('--epochs', type=int, default=61)  # 500200 batches at bs 16, 117263 images = 273 epochs
-    parser.add_argument('--batch_size', type=int, default=48)  # effective bs = batch_size * accumulate = 16 * 4 = 64
+    parser.add_argument('--epochs', type=int, default=20)  # 500200 batches at bs 16, 117263 images = 273 epochs
+    parser.add_argument('--batch_size', type=int, default=48*times)  # effective bs = batch_size * accumulate = 16 * 4 = 64
     parser.add_argument('--accumulate', type=int, default=2, help='batches to accumulate before optimizing')
     # parser.add_argument('--cfg', type=str, default='cfg/yolov3tiny-mobilenet-small/yolov3tiny-mobilenet-small-test4cls.cfg', help='cfg file path')
     # parser.add_argument('--cfg', type=str, default='cfg/yolov3-mobilenet/yolov3-mobilenet-car.cfg', help='cfg file path')
@@ -518,7 +520,7 @@ if __name__ == '__main__':
     parser.add_argument('--cache_images', action='store_true', default=False, help='cache images for faster training')
     parser.add_argument('--lmdb', default=False, help='cache images for faster training')
     parser.add_argument('--shelve', default=False, help='cache images for faster training')
-    parser.add_argument('--weights', type=str, default='',
+    parser.add_argument('--weights', type=str, default='/data/det/out/DetSaves/ysave/20200516_1419/backup15.pt',
     # parser.add_argument('--weights', type=str, default='/data/det/out/DetSaves/ysave/20200510_2149/last.pt',
     # parser.add_argument('--weights', type=str, default='/data/det/out/DetSaves/ysave/20200508_2334/last.pt',
     # parser.add_argument('--weights', type=str, default='weights/yolov3.weights',

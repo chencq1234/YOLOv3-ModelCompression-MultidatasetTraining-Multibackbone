@@ -600,7 +600,7 @@ def convert(cfg='cfg/yolov3-spp.cfg', weights='weights/yolov3-spp.weights'):
         if os.path.isfile(weights):
             model.load_state_dict(torch.load(weights, map_location='cpu')['model'])
         model.save_weights(path=weights.replace('.pt', '.weights'), cutoff=-1)
-        print("Success: converted '%s' to 'converted.weights'" % weights)
+        print("Success: converted '%s' to 'converted.weights'" % weights.replace('.pt', '.weights'))
 
     elif weights.endswith('.weights'):  # darknet format
         _ = load_darknet_weights(model, weights)
@@ -671,7 +671,7 @@ def save_as_onnx(model, save_name):
 
 if __name__ == '__main__':
     # net = Darknet('cfg/yolov3tiny-mobilenet-small/yolov3tiny-mobilenet-small-test4cls.cfg',
-    net = Darknet('cfg/yolov3/yolov3-spp-lite-car.cfg', arc='default')
+    # net = Darknet('cfg/yolov3/yolov3-spp-lite-car.cfg', arc='default')
     # net = Darknet('cfg/yolov3/yolov3-spp-lite-car.cfg', arc='default')
     # net = Darknet('cfg/yolov3/yolov3carSM.cfg', arc='default')
     # net = Darknet('cfg/yolov3tiny/yolov3-tinycar.cfg', arc='default')
@@ -684,6 +684,12 @@ if __name__ == '__main__':
 
     # convert('cfg/yolov3/yolov3-spp-lite-car.cfg',
     #         weights='weights/yolov3SM/sppl.pt')
+
+    # convert('cfg/yolov3/yolov3-spp-lite-car.cfg',
+    #         weights='weights/20200514_1826/last.pt')
+
+    convert('cfg/yolov3/yolov3-spp-lite-car.cfg',
+            weights='weights/20200514_2017/sppl5.pt')
 
     # convert('cfg/yolov3tiny-mobilenet-small/yolov3tiny-mobilenet-small-didi8cls.cfg',
     #         weights='weights/yolov3SM/v3mbs.pt')
@@ -702,7 +708,9 @@ if __name__ == '__main__':
     #         weights='weights/20200508_2334/last.pt')
 
             # weights='weights/20200507_0055/best2.pt')
-    from torchstat import stat
-    stat(net, (3, 416, 416))
+
+    # from torchstat import stat
+    # stat(net, (3, 320, 320))
+
     # save_as_onnx(net, 'weights/yolov3-mobilenet-car.onnx')
     # save_as_onnx(net, 'weights/yolov3tiny-mobilenet-small-test4cls.onnx')
